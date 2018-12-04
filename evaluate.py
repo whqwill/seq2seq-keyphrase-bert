@@ -21,6 +21,8 @@ from pykp.metric.bleu import bleu
 
 stemmer = PorterStemmer()
 
+
+
 def process_predseqs(pred_seqs, oov, id2word, opt):
     '''
     :param pred_seqs:
@@ -169,6 +171,12 @@ def changeFormat(str):
         str_new.append(tmp)
     return str_new
 
+def getPos(src_len):
+    return torch.tensor([list(range(1, id + 1)) + [0] * (max(src_len) - id) for id in src_len])
+
+def getLen(src):
+    return [a.size(0) if int(a[-1]) != 0 else [int(id) for id in a].index(0) for a in src]
+
 def evaluate_beam_search(generator, data_loader, opt, title='', epoch=1, predict_save_path=None):
     logger = config.init_logging(title, predict_save_path + '/%s.log' % title, redirect_to_stdout=False)
     progbar = Progbar(logger=logger, title=title, target=len(data_loader.dataset.examples), batch_size=data_loader.batch_size,
@@ -185,14 +193,20 @@ def evaluate_beam_search(generator, data_loader, opt, title='', epoch=1, predict
     num_pre = 0.00001
 
     for i, batch in enumerate(data_loader):
-        if i > 100:
+        if i > 200:
             break
 
         one2many_batch, one2one_batch = batch
         src_list, src_len, trg_list, _, trg_copy_target_list, src_oov_map_list, oov_list, src_str_list, trg_str_list = one2many_batch
 
+        if src_list.size(1) > 1000:
+            continue
+
+        src_pos = getPos(src_len)
+
         if torch.cuda.is_available() and opt.useGpu:
             src_list = src_list.cuda()
+            src_pos = src_pos.cuda()
             src_oov_map_list = src_oov_map_list.cuda()
 
         print("batch size - %s" % str(src_list.size(0)))
@@ -200,19 +214,22 @@ def evaluate_beam_search(generator, data_loader, opt, title='', epoch=1, predict
         print("target size - %s" % len(trg_copy_target_list))
 
         if opt.encoder_type == 'bert':
-            pred_seq_list = generator.beam_search_bert(src_list, src_oov_map_list, oov_list, opt.word2id)
+            pred_seq_list = generator.beam_search_bert(src_list, src_oov_map_list, oov_list, opt.word2id, opt.id2word, src_str_list)
         elif opt.encoder_type == 'bert_low':
-            pred_seq_list = generator.beam_search_bert_low(src_list, src_oov_map_list, oov_list, opt.word2id)
+            pred_seq_list = generator.beam_search_bert_low(src_list, src_oov_map_list, oov_list, opt.word2id, opt.id2word, src_str_list)
+        elif opt.encoder_type == 'transformer':
+            pred_seq_list = generator.beam_search_transformer(src_list, src_pos, src_oov_map_list, oov_list, opt.word2id, opt.id2word, src_str_list)
         else:
-            pred_seq_list = generator.beam_search(src_list, src_len, src_oov_map_list, oov_list, opt.word2id)
+            pred_seq_list = generator.beam_search(src_list, src_len, src_oov_map_list, oov_list, opt.word2id, opt.id2word, src_str_list)
 
         '''
         process each example in current batch
         '''
         for src, src_str, trg, trg_str_seqs, trg_copy, pred_seq, oov in zip(src_list, src_str_list, trg_list, trg_str_list, trg_copy_target_list, pred_seq_list, oov_list):
 
-            src_str = changeFormat(src_str)
-            trg_str_seqs = [changeFormat(str) for str in trg_str_seqs]
+            if opt.encoder_type.startswith("bert"):
+                src_str = changeFormat(src_str)
+                trg_str_seqs = [changeFormat(str) for str in trg_str_seqs]
 
             logger.info('======================  %d =========================' % (i))
             print_out = ''
@@ -236,7 +253,8 @@ def evaluate_beam_search(generator, data_loader, opt, title='', epoch=1, predict
             # 1st filtering
             pred_is_valid_flags, processed_pred_seqs, processed_pred_str_seqs, processed_pred_score = process_predseqs(pred_seq, oov, opt.id2word, opt)
 
-            processed_pred_str_seqs = [changeFormat(str) for str in processed_pred_str_seqs]
+            if opt.encoder_type.startswith("bert"):
+                processed_pred_str_seqs = [changeFormat(str) for str in processed_pred_str_seqs]
 
             # 2nd filtering: if filter out phrases that don't appear in text, and keep unique ones after stemming
             if opt.must_appear_in_src:

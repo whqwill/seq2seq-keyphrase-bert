@@ -21,7 +21,7 @@ from utils import Progbar, plot_learning_curve_and_write_csv
 from config import init_logging, init_opt
 import pykp
 from pykp.io import KeyphraseDataset
-from pykp.model import Seq2SeqLSTMAttention, Seq2SeqLSTMAttentionCascading, Seq2SeqBERT, Seq2SeqBERTLow
+from pykp.model import Seq2SeqLSTMAttention, Seq2SeqLSTMAttentionCascading, Seq2SeqBERT, Seq2SeqBERTLow, Seq2SeqTransformer
 
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 
@@ -95,10 +95,17 @@ def _valid_error(data_loader, model, criterion, epoch, opt):
 
     return losses
 
+def getPos(src_len):
+    return torch.tensor([list(range(1, id + 1)) + [0] * (max(src_len) - id) for id in src_len])
+
+def getLen(src):
+    return [a.size(0) if int(a[-1]) != 0 else [int(id) for id in a].index(0) for a in src]
 
 def train_ml(one2one_batch, model, optimizer, criterion, opt):
     src, src_len, trg, trg_target, trg_copy_target, src_oov, oov_lists = one2one_batch
     max_oov_number = max([len(oov) for oov in oov_lists])
+    src_pos = getPos(src_len)
+    trg_pos = getPos(getLen(trg))
 
     print("src size - ", src.size())
     print("target size - ", trg.size())
@@ -109,6 +116,8 @@ def train_ml(one2one_batch, model, optimizer, criterion, opt):
         trg_target = trg_target.cuda()
         trg_copy_target = trg_copy_target.cuda()
         src_oov = src_oov.cuda()
+        src_pos = src_pos.cuda()
+        trg_pos = trg_pos.cuda()
 
     optimizer.zero_grad()
 
@@ -116,6 +125,8 @@ def train_ml(one2one_batch, model, optimizer, criterion, opt):
         decoder_log_probs, _, _ = model.forward(src, trg, src_oov, oov_lists)
     elif opt.encoder_type == 'bert_low':
         decoder_log_probs, _ = model.forward(src, trg)
+    elif opt.encoder_type == 'transformer':
+        decoder_log_probs, _, _ = model.forward(src, src_pos, trg, trg_pos, src_oov, oov_lists)
     else:
         decoder_log_probs, _, _ = model.forward(src, src_len, trg, src_oov, oov_lists)
 
@@ -416,6 +427,7 @@ def brief_report(epoch, batch_i, one2one_batch, loss_ml, decoder_log_probs, opt)
 
 def train_model(model, optimizer_ml, optimizer_rl, criterion, train_data_loader, valid_data_loader, test_data_loader, opt):
     generator = SequenceGenerator(model,
+                                  opt.word_vec_size if opt.encoder_type == 'transformer' else opt.vocab_size,
                                   eos_id=opt.word2id[pykp.io.EOS_WORD],
                                   beam_size=opt.beam_size,
                                   max_sequence_length=opt.max_sent_length,
@@ -476,7 +488,7 @@ def train_model(model, optimizer_ml, optimizer_rl, criterion, train_data_loader,
                 print ()
 
             # Training
-            if opt.train_ml and (opt.encoder_type == 'rnn' or (one2one_batch[0].size(0) * one2one_batch[0].size(1) <= 2560 and one2one_batch[0].size(1) <= 512)):
+            if opt.train_ml and (not opt.encoder_type == 'transformer' or (one2one_batch[0].size(0) * one2one_batch[0].size(1) <= 12800 and one2one_batch[0].size(1) <= 512)) and (not opt.encoder_type.startswith('bert') or (one2one_batch[0].size(0) * one2one_batch[0].size(1) <= 2560 and one2one_batch[0].size(1) <= 512)):
                 loss_ml, decoder_log_probs = train_ml(one2one_batch, model, optimizer_ml, criterion, opt)
                 train_ml_losses.append(loss_ml)
                 report_loss.append(('train_ml_loss', loss_ml))
@@ -509,8 +521,18 @@ def train_model(model, optimizer_ml, optimizer_rl, criterion, train_data_loader,
                 logging.info('Run validing and testing @Epoch=%d,#(Total batch)=%d' % (epoch, total_batch))
                 # valid_losses    = _valid_error(valid_data_loader, model, criterion, epoch, opt)
                 # valid_history_losses.append(valid_losses)
-                valid_score_dict = evaluate_beam_search(generator, valid_data_loader, opt, title='Validating, epoch=%d, batch=%d, total_batch=%d' % (epoch, batch_i, total_batch), epoch=epoch, predict_save_path=opt.pred_path + '/epoch%d_batch%d_total_batch%d' % (epoch, batch_i, total_batch))
-                test_score_dict = evaluate_beam_search(generator, test_data_loader, opt, title='Testing, epoch=%d, batch=%d, total_batch=%d' % (epoch, batch_i, total_batch), epoch=epoch, predict_save_path=opt.pred_path + '/epoch%d_batch%d_total_batch%d' % (epoch, batch_i, total_batch))
+                if opt.onlyTest:
+                    test_score_dict = evaluate_beam_search(generator, test_data_loader, opt,
+                                                           title='Testing, epoch=%d, batch=%d, total_batch=%d' % (
+                                                           epoch, batch_i, total_batch), epoch=epoch,
+                                                           predict_save_path=opt.pred_path + '/epoch%d_batch%d_total_batch%d' % (
+                                                           epoch, batch_i, total_batch))
+
+                    early_stop_flag = True
+                    break
+                else:
+                    valid_score_dict = evaluate_beam_search(generator, valid_data_loader, opt, title='Validating, epoch=%d, batch=%d, total_batch=%d' % (epoch, batch_i, total_batch), epoch=epoch, predict_save_path=opt.pred_path + '/epoch%d_batch%d_total_batch%d' % (epoch, batch_i, total_batch))
+                    test_score_dict = evaluate_beam_search(generator, test_data_loader, opt, title='Testing, epoch=%d, batch=%d, total_batch=%d' % (epoch, batch_i, total_batch), epoch=epoch, predict_save_path=opt.pred_path + '/epoch%d_batch%d_total_batch%d' % (epoch, batch_i, total_batch))
 
                 checkpoint_names.append('epoch=%d-batch=%d-total_batch=%d' % (epoch, batch_i, total_batch))
 
@@ -585,6 +607,20 @@ def train_model(model, optimizer_ml, optimizer_rl, criterion, train_data_loader,
                     break
                 logging.info('*' * 50)
 
+            '''
+            # only store the checkpoints that make better validation performances
+            if total_batch > 1 and (total_batch % opt.save_model_every == 0):  # epoch >= opt.start_checkpoint_at and
+                    # Save the checkpoint
+                logging.info('Saving checkpoint to: %s' % os.path.join(opt.model_path,
+                                                                           '%s.epoch=%d.batch=%d.total_batch=%d' % (
+                                                                           opt.exp, epoch, batch_i, total_batch) + '.model'))
+                torch.save(
+                        model.state_dict(),
+                        open(os.path.join(opt.model_path, '%s.epoch=%d.batch=%d.total_batch=%d' % (
+                        opt.exp, epoch, batch_i, total_batch) + '.model'), 'wb')
+                    )
+            '''
+
 
 def load_data_vocab(opt, load_train=True):
 
@@ -617,7 +653,7 @@ def load_data_vocab(opt, load_train=True):
 
     # !important. As it takes too long to do beam search, thus reduce the size of validation and test datasets
     valid_one2many = valid_one2many[:2000]
-    test_one2many = test_one2many[:2000]
+    test_one2many = test_one2many#[:2000]
 
     valid_one2many_dataset = KeyphraseDataset(valid_one2many, word2id=word2id, id2word=id2word, type='one2many', include_original=True)
     test_one2many_dataset = KeyphraseDataset(test_one2many, word2id=word2id, id2word=id2word, type='one2many', include_original=True)
@@ -715,6 +751,8 @@ def init_model(opt):
             model = Seq2SeqBERT(opt)
         elif opt.encoder_type == 'bert_low':
             model = Seq2SeqBERTLow(opt)
+        elif opt.encoder_type == 'transformer':
+            model = Seq2SeqTransformer(opt)
         else:
             model = Seq2SeqLSTMAttention(opt)
 
@@ -752,27 +790,58 @@ def main():
     opt = init_opt(description='train.py')
 
     opt.useGpu = 1
-    opt.useOnlyTwo = False
-    opt.useCLF = False
-    opt.avgHidden = True
-    opt.useZeroDecodeHidden = False
-    opt.useSameEmbeding = False
-    opt.batch_size = 10
+
     opt.encoder_type = 'bert'
-    opt.max_sent_length = 10
-    opt.run_valid_every = 20000
-    #opt.data = 'data3/kp20k_small/kp20k'
-    #opt.vocab = 'data3/kp20k_small/kp20k.vocab.pt'
-    #opt.enc_layers = 2
-    #opt.bidirectional = True
-    #opt.copy_attention = False
-    opt.decode_old = False
-    opt.beam_search_batch_size = 10
-    if opt.encoder_type.startswith('bert'):
+
+    opt.useCLF = True
+
+    opt.data = 'data/kp20k/kp20k'
+    opt.vocab = 'data/kp20k/kp20k.vocab.pt'
+
+    if opt.encoder_type == 'transformer':
+        opt.batch_size = 32
+        opt.d_inner = 2048
+        opt.enc_n_layers = 4
+        opt.dec_n_layers = 2
+        opt.n_head = 8
+        opt.d_k = 64
+        opt.d_v = 64
+        opt.d_model = 512
+        opt.word_vec_size = 512
+        opt.run_valid_every = 5000000
+        opt.save_model_every = 20000
+        opt.decode_old = True
+        #opt.copy_attention = False
+    elif opt.encoder_type == 'bert':
+        opt.useOnlyTwo = False
+        opt.avgHidden = False
+        opt.useZeroDecodeHidden = True
+        opt.useSameEmbeding = False
+        opt.batch_size = 10
+        opt.max_sent_length = 10
+        opt.run_valid_every = 40000
+        opt.decode_old = False
+        opt.beam_search_batch_size = 10
         opt.bert_model = 'bert-base-uncased'
         opt.tokenizer = BertTokenizer.from_pretrained(opt.bert_model)
-    if opt.encoder_type == 'bert_low':
-        opt.copy_attention = False
+        if opt.encoder_type == 'bert_low':
+            opt.copy_attention = False
+    else:
+        opt.enc_layers = 2
+        opt.bidirectional = True
+        opt.decode_old = True
+        opt.run_valid_every = 2
+
+    opt.onlyTest = False
+    if opt.onlyTest:
+        opt.train_ml = False
+        opt.run_valid_every = 5
+        opt.beam_size = 64
+        opt.beam_search_batch_size = 128
+        #opt.train_from = 'exp/kp20k.ml.copy.20181129-193506/model/kp20k.ml.copy.epoch=1.batch=20000.total_batch=20000.model'
+        opt.train_from = 'exp/kp20k.ml.copy.20181128-153121/model/kp20k.ml.copy.epoch=2.batch=15495.total_batch=38000.model'
+        #opt.train_from = 'exp/kp20k.ml.copy.20181117-190121/model/kp20k.ml.copy.epoch=3.batch=14172.total_batch=56000.model'
+
 
     logging = init_logging(logger_name='train.py', log_file=opt.log_file, redirect_to_stdout=False)
 
@@ -800,6 +869,7 @@ def main():
         optimizer_ml, optimizer_rl, criterion = init_optimizer_criterion(model, opt)
         if torch.cuda.is_available() and opt.useGpu:
             criterion.cuda()
+
         train_model(model, optimizer_ml, optimizer_rl, criterion, train_data_loader, valid_data_loader, test_data_loader, opt)
     except Exception as e:
         logging.error(e, exc_info=True)

@@ -55,7 +55,7 @@ def load_vocab_and_testsets(opt):
         test_one2many = torch.load(testset_path, 'wb')
         test_one2many_dataset = KeyphraseDataset(test_one2many, word2id=word2id, id2word=id2word, type='one2many', include_original=True)
         test_one2many_loader = KeyphraseDataLoader(dataset=test_one2many_dataset,
-                                                   collate_fn=test_one2many_dataset.collate_fn_one2many,
+                                                   collate_fn=test_one2many_dataset.collate_fn_one2many if opt.useCLF else test_one2many_dataset.collate_fn_one2many_noBeginEnd,
                                                    num_workers=opt.batch_workers,
                                                    max_batch_example=opt.beam_search_batch_example,
                                                    max_batch_pair=opt.beam_search_batch_size,
@@ -72,26 +72,48 @@ def load_vocab_and_testsets(opt):
 def main():
     opt = config.init_opt(description='predict.py')
 
-    #opt.useGpu = 1
-    #opt.enc_layers = 2
-    #opt.bidirectional = True
-    #opt.beam_size = 100
-    opt.useGpu = 1
-    opt.batch_size = 10
-    opt.encoder_type = 'bert_low'
-    opt.max_sent_length = 10
-    opt.run_valid_every = 20000
-    opt.useOnlyTwo = False
-    opt.useCLF = True
-    #opt.copy_attention = False
-    opt.decode_old = False
-    opt.beam_search_batch_size = 10
-    if opt.encoder_type.startswith('bert'):
+    opt.data = 'data3/kp20k/kp20k'
+    opt.vocab = 'data3/kp20k/kp20k.vocab.pt'
+    #opt.train_from = 'exp/kp20k.ml.copy.20181129-193506/model/kp20k.ml.copy.epoch=1.batch=20000.total_batch=20000.model'
+    opt.train_from = 'exp/kp20k.ml.copy.20181128-153121/model/kp20k.ml.copy.epoch=2.batch=15495.total_batch=38000.model'
+
+    opt.useGpu = 0
+    opt.encoder_type = 'rnn'
+
+    opt.useCLF = False
+
+    if opt.encoder_type.startswith('transformer'):
+        opt.batch_size = 32
+        opt.d_inner = 2048
+        opt.enc_n_layers = 4
+        opt.dec_n_layers = 2
+        opt.n_head = 8
+        opt.d_k = 64
+        opt.d_v = 64
+        opt.d_model = 512
+        opt.word_vec_size = 512
+        opt.run_valid_every = 5000000
+        opt.save_model_every = 20000
+        opt.decode_old = True
+        # opt.copy_attention = False
+    elif opt.encoder_type.startswith('bert'):
+        opt.useOnlyTwo = False
+        opt.avgHidden = True
+        opt.useZeroDecodeHidden = False
+        opt.useSameEmbeding = False
+        opt.batch_size = 10
+        opt.max_sent_length = 10
+        opt.run_valid_every = 20000
+        opt.decode_old = False
+        opt.beam_search_batch_size = 10
         opt.bert_model = 'bert-base-uncased'
         opt.tokenizer = BertTokenizer.from_pretrained(opt.bert_model)
-    #opt.max_sent_length = 6
-    if opt.encoder_type == 'bert_low':
-        opt.copy_attention = False
+        if opt.encoder_type == 'bert_low':
+            opt.copy_attention = False
+    else:
+        opt.enc_layers = 2
+        opt.bidirectional = True
+        opt.decode_old = True
 
     logger = config.init_logging('predict', opt.exp_path + '/output.log', redirect_to_stdout=False)
 
@@ -115,6 +137,7 @@ def main():
             model.cuda()
 
         generator = SequenceGenerator(model,
+                                      opt.word_vec_size if opt.encoder_type == 'transformer' else opt.vocab_size,
                                       eos_id=opt.word2id[pykp.io.EOS_WORD],
                                       beam_size=opt.beam_size,
                                       max_sequence_length=opt.max_sent_length,

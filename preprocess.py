@@ -9,6 +9,8 @@ import torch
 import config
 import pykp.io
 
+from bert_pytorch.dataset import BERTDataset, WordVocab
+
 from pytorch_pretrained_bert.tokenization import BertTokenizer
 
 
@@ -27,8 +29,8 @@ parser.add_argument('-output_path_prefix', default='data',
 config.preprocess_opts(parser)
 opt = parser.parse_args()
 
-opt.output_path_prefix = 'data3'
-opt.source_dataset_dir = 'data3'
+opt.output_path_prefix = 'data4'
+opt.source_dataset_dir = 'data4'
 
 
 # input path of each json file
@@ -50,6 +52,7 @@ if not os.path.exists(opt.subset_output_path):
 def main():
     opt.use_bert = False
     opt.build_own_vocab = True
+    opt.useAreadyVocab = True
     #opt.src_seq_length_trunc = 510
 
     if opt.use_bert:
@@ -93,6 +96,11 @@ def main():
         id2word = opt.tokenizer.ids_to_tokens
         vocab = None
         print('Vocab size = %d' % len(word2id))
+    elif opt.useAreadyVocab:
+        vocab = WordVocab.load_vocab("data4/vocab.30")
+        word2id = vocab.stoi
+        id2word = vocab.itos
+        vocab = vocab.freqs
     else:
         print("Building Vocab...")
         word2id, id2word, vocab = pykp.io.build_vocab(tokenized_train_pairs, opt)
