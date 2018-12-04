@@ -824,8 +824,6 @@ def main():
         opt.beam_search_batch_size = 10
         opt.bert_model = 'bert-base-uncased'
         opt.tokenizer = BertTokenizer.from_pretrained(opt.bert_model)
-        if opt.encoder_type == 'bert_low':
-            opt.copy_attention = False
     else:
         opt.enc_layers = 2
         opt.bidirectional = True
